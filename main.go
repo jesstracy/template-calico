@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
+	"regexp"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 )
@@ -41,7 +44,7 @@ func run() error {
 	}
 
 	// translate the values file into a map
-	values, err := r.pullValues()
+	values, err := r.mapValues()
 	if err != nil {
 		return err
 	}
@@ -51,14 +54,19 @@ func run() error {
 	}
 
 	// Take the values file and look for template spots
-	//templatedValuesFile, err := r.findAndReplace()
-	//if err != nil {
-	//	return err
-	//}
+	templatedCalicoLines, err := r.findAndReplace()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("\ntemplated manifest:")
+	for _, line := range templatedCalicoLines {
+		fmt.Println(line)
+	}
 	return nil
 }
 
-func (r *runner) pullValues() (map[string]interface{}, error) {
+func (r *runner) mapValues() (map[string]interface{}, error) {
 	valuesBytes, err := ioutil.ReadFile(r.args.valuesFile)
 	if err != nil {
 		return nil, errors.Wrap(err, "error reading values file")
@@ -71,8 +79,59 @@ func (r *runner) pullValues() (map[string]interface{}, error) {
 	return values, nil
 }
 
-func (r *runner) findAndReplace() (string, error) {
+func (r *runner) findAndReplace() ([]string, error) {
+	// read in lines from calico template
+	lines, err := readLines(r.args.templateFile)
+	if err != nil {
+		return nil, errors.Wrap(err, "error reading calico template file")
+	}	
 	// look for stuff that starts with {{
+	fillMeIn := regexp.MustCompile(`{{(.*)}}`)
+	newLines := []string{}
+	for _, line := range lines {
+		if loc := fillMeIn.FindStringSubmatchIndex(line); loc != nil { // returns [starting index of regex, end index of regex, start index of submatch, end index of submatch]
+			if len(loc) < 4 {
+				return nil, errors.New(fmt.Sprintf("format error in line %s", line))
+			}
+			newLine, err := r.replaceWithValueFromFile(line, loc)
+			if err != nil {
+				return nil, err
+			}
+			newLines = append(newLines, newLine)
+		} else {
+			newLines = append(newLines, line)
+		}
+	}
+	return newLines, nil
+}
+
+func readLines(valueFile string) ([]string, error) {
+	lines := []string{}
+	file, err := os.Open(valueFile)
+	defer file.Close()
+	if err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			} else {
+				return nil, err
+			}
+		}
+		// if the line is empty or commented out, don't add
+		if ((line != "\n") && !regexp.MustCompile(`^\s{0,}#.*`).Match([]byte(line))) {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+func (r *runner) replaceWithValueFromFile(line string, locationMatch []int) (string, error) {
+	fmt.Println("This line has something to replace!!!", line)
 	return "", nil
 }
 
