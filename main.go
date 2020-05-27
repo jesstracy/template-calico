@@ -17,15 +17,17 @@ type args struct {
 	namespace string
 	valuesFile string
 	templateFile string
+	manifestLocation string
 }
 
 type runner struct {
 	args args
+	values map[string]interface{}
 }
 
 // TODO there will often be 2 values files
 // TODO this assumes that all values look like straight {{ blah }} and not {{ bla | blah }} or {{ include blah }} etc.
-// Needs to take in release name, release namespace, values file, and calico-templates
+// Needs to take in release name, release namespace, values file, calico-templates, and manifest output location
 func main() {
 	if err := run(); err != nil {
 		fmt.Println("Error:", err)
@@ -34,15 +36,16 @@ func main() {
 }
 
 func run() error {
-	if (len(os.Args[1:]) < 4) {
+	if (len(os.Args[1:]) < 5) {
 		return errors.New(fmt.Sprintf("incorrect number of arguments.\n%s", usage()))
 	}
 	r := &runner{
 		args: args{
-			release: os.Args[1],
+			release: os.Args[1], // TODO use cobra if we might ever use this from cli. probably good to even if just from CI/CD
 			namespace: os.Args[2],
 			valuesFile: os.Args[3],
 			templateFile: os.Args[4],
+			manifestLocation: os.Args[5],
 		},
 	}
 
@@ -51,21 +54,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	for k, v := range values {
-		fmt.Println(k, v)
-	}
+	r.values = values
 
 	// Take the values file and look for template spots
 	templatedCalicoLines, err := r.findAndReplace()
-	//_, err = r.findAndReplace()
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("\ntemplated manifest:")
-	for _, line := range templatedCalicoLines {
-		fmt.Println(line)
+	if err := r.writeManifestFile(templatedCalicoLines); err != nil {
+		return err
 	}
 	return nil
 }
@@ -84,12 +82,11 @@ func (r *runner) mapValues() (map[string]interface{}, error) {
 }
 
 func (r *runner) findAndReplace() ([]string, error) {
-	// read in lines from calico template
 	lines, err := readLines(r.args.templateFile)
 	if err != nil {
 		return nil, errors.Wrap(err, "error reading calico template file")
 	}	
-	// look for stuff that starts with {{
+
 	fillMeIn := regexp.MustCompile(`{{(.*)}}`)
 	newLines := []string{}
 	for _, line := range lines {
@@ -134,33 +131,77 @@ func readLines(valueFile string) ([]string, error) {
 	return lines, nil
 }
 
-// TODO unit test
 func (r *runner) replaceTemplateValue(line string, locationMatch []int) (string, error) {
-	fmt.Println("This line has something to replace!!!", line)
 	valueToGet := strings.TrimSpace(line[locationMatch[2]:locationMatch[3]])
 	keys := strings.Split(valueToGet, ".")[1:] // first one will be the context (blank or $)
 	if len(keys) < 2 {
 		return "", errors.New(fmt.Sprintf("cannot template value %s", valueToGet))
 	}
 	newValue := ""
-	switch keys[0] {
-	case "Release":
-		if keys[1] == "Name" {
+	// TODO could be a list, not string or map
+	if keys[0] == "Release" {
+		switch keys[1] {
+		case "Name":
 			newValue = r.args.release
-		} else if keys[1] == "Namespace" {
+		case "Namespace":
 			newValue = r.args.namespace
-		} else { // TODO more release things?
+		default: // TODO more release values?
 			return "", errors.New(fmt.Sprintf("unknown value: %s", valueToGet))
 		}
-	case "Values":
-		newValue = "We got a VALUE ohno"
-	default:
+	} else if keys[0] == "Values" {
+		switch len(keys) {
+		case 2:
+			if s, ok := r.values[keys[1]].(string); ok {
+				newValue = s
+			}
+		case 3:
+			if m, ok := r.values[keys[1]].(map[interface{}]interface{}); ok {
+				if s, ok := m[keys[2]].(string); ok {
+					newValue = s
+				}
+			}
+		case 4:
+			if m, ok := r.values[keys[1]].(map[interface{}]interface{}); ok {
+				fmt.Println("r.values[keys[1]] is a map")
+				if m2, ok := m[keys[2]].(map[interface{}]interface{}); ok {
+					if s, ok := m2[keys[3]].(string); ok {
+						newValue = s
+					}
+				}
+			}
+		default:
+			return "", errors.New(fmt.Sprintf("The value %s is nested too deeply for this program to currently handle", valueToGet))
+		}
+	} else {
 		return "", errors.New(fmt.Sprintf("cannot template value %s", valueToGet))
 	}
+	
 	newLine := line[:locationMatch[0]] + newValue + line[locationMatch[1]:]
 	return newLine, nil
 }
 
+func (r *runner) writeManifestFile(lines []string) error {
+	f, err := os.OpenFile(r.args.manifestLocation, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return errors.Wrap(err, "error writing manifest file")
+	}
+
+	writer := bufio.NewWriter(f)
+	for _, line := range lines {
+		_, err := writer.WriteString(line)
+		if err != nil {
+			return errors.Wrap(err, "error writing manifest file")
+		}
+	}
+	writer.Flush()
+	f.Close()
+
+	fmt.Println("Wrote manifest to", r.args.manifestLocation)
+	fmt.Println("apply it with: calicoctl apply -f", r.args.manifestLocation)
+
+	return nil
+}
+
 func usage() string {
-	return "Usage:\n    calico-template <release-name> <namespace> <values-file> <calico-template-file>"
+	return "Usage:\n    calico-template <release-name> <namespace> <values-file> <calico-template-file> <manifest-output-file>"
 }

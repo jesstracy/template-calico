@@ -6,6 +6,14 @@ import (
 )
 
 func TestReplaceTemplateValue(t *testing.T) {
+	r := &runner{
+		args: args{release: "test-release-name", namespace: "test-namespace"},
+		values: map[string]interface{}{
+			"config": "hello",
+			"networkPolicy": map[interface{}]interface{}{"denyCIDR": "10.1.2.3/4"},
+			"calico": map[interface{}]interface{}{"networkPolicy": map[interface{}]interface{}{"denyCIDR": "10.5.6.7/8"}},
+		},
+	}
 	testCases := []struct {
 		name          string
 		oldLine       string
@@ -28,6 +36,34 @@ func TestReplaceTemplateValue(t *testing.T) {
 			expectedErr: nil,
 		},
 		{
+			name: "Values one level deep",
+			oldLine: "config: {{ .Values.config }}",
+			location: []int{8, 28, 10, 26},
+			expected: "config: hello",
+			expectedErr: nil,
+		},
+		{
+			name: "Values two levels deep",
+			oldLine: "    except: {{ .Values.networkPolicy.denyCIDR }}",
+			location: []int{12, 48, 14, 46},
+			expected: "    except: 10.1.2.3/4",
+			expectedErr: nil,
+		},
+		{
+			name: "Values three levels deep",
+			oldLine: "    except: {{ .Values.calico.networkPolicy.denyCIDR }}",
+			location: []int{12, 55, 14, 53},
+			expected: "    except: 10.5.6.7/8",
+			expectedErr: nil,
+		},
+		{
+			name: "Values four levels deep",
+			oldLine: "    except: {{ .Values.test.calico.networkPolicy.denyCIDR }}",
+			location: []int{12, 60, 14, 58},
+			expected: "",
+			expectedErr: errors.New("The value .Values.test.calico.networkPolicy.denyCIDR is nested too deeply for this program to currently handle"),
+		},
+		{
 			name: "Not release or values",
 			oldLine: "test: {{ notRight }}-network-policy",
 			location: []int{6, 20, 8, 18},
@@ -37,7 +73,6 @@ func TestReplaceTemplateValue(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		tc := tc
-		r := &runner{args: args{release: "test-release-name", namespace: "test-namespace"}}
 		t.Run(tc.name, func(subT *testing.T) {
 			result, err := r.replaceTemplateValue(tc.oldLine, tc.location)
 			if err != nil {
