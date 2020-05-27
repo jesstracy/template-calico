@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"regexp"
+	"strings"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 )
@@ -22,6 +23,8 @@ type runner struct {
 	args args
 }
 
+// TODO there will often be 2 values files
+// TODO this assumes that all values look like straight {{ blah }} and not {{ bla | blah }} or {{ include blah }} etc.
 // Needs to take in release name, release namespace, values file, and calico-templates
 func main() {
 	if err := run(); err != nil {
@@ -55,6 +58,7 @@ func run() error {
 
 	// Take the values file and look for template spots
 	templatedCalicoLines, err := r.findAndReplace()
+	//_, err = r.findAndReplace()
 	if err != nil {
 		return err
 	}
@@ -93,7 +97,7 @@ func (r *runner) findAndReplace() ([]string, error) {
 			if len(loc) < 4 {
 				return nil, errors.New(fmt.Sprintf("format error in line %s", line))
 			}
-			newLine, err := r.replaceWithValueFromFile(line, loc)
+			newLine, err := r.replaceTemplateValue(line, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -130,9 +134,31 @@ func readLines(valueFile string) ([]string, error) {
 	return lines, nil
 }
 
-func (r *runner) replaceWithValueFromFile(line string, locationMatch []int) (string, error) {
+// TODO unit test
+func (r *runner) replaceTemplateValue(line string, locationMatch []int) (string, error) {
 	fmt.Println("This line has something to replace!!!", line)
-	return "", nil
+	valueToGet := strings.TrimSpace(line[locationMatch[2]:locationMatch[3]])
+	keys := strings.Split(valueToGet, ".")[1:] // first one will be the context (blank or $)
+	if len(keys) < 2 {
+		return "", errors.New(fmt.Sprintf("cannot template value %s", valueToGet))
+	}
+	newValue := ""
+	switch keys[0] {
+	case "Release":
+		if keys[1] == "Name" {
+			newValue = r.args.release
+		} else if keys[1] == "Namespace" {
+			newValue = r.args.namespace
+		} else { // TODO more release things?
+			return "", errors.New(fmt.Sprintf("unknown value: %s", valueToGet))
+		}
+	case "Values":
+		newValue = "We got a VALUE ohno"
+	default:
+		return "", errors.New(fmt.Sprintf("cannot template value %s", valueToGet))
+	}
+	newLine := line[:locationMatch[0]] + newValue + line[locationMatch[1]:]
+	return newLine, nil
 }
 
 func usage() string {
