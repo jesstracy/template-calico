@@ -9,15 +9,16 @@ import (
 	"regexp"
 	"strings"
 	"github.com/pkg/errors"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 )
 
 type args struct {
 	release string
 	namespace string
-	valuesFile string
+	valuesFiles []string
 	templateFile string
-	manifestLocation string
+	outputLocation string
 }
 
 type runner struct {
@@ -25,30 +26,37 @@ type runner struct {
 	values map[string]interface{}
 }
 
-// TODO there will often be 2 values files
 // TODO this assumes that all values look like straight {{ blah }} and not {{ bla | blah }} or {{ include blah }} etc.
-// Needs to take in release name, release namespace, values file, calico-templates, and manifest output location
 func main() {
 	if err := run(); err != nil {
-		fmt.Println("Error:", err)
+		_, _ = fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	if (len(os.Args[1:]) < 5) {
-		return errors.New(fmt.Sprintf("incorrect number of arguments.\n%s", usage()))
-	}
-	r := &runner{
-		args: args{
-			release: os.Args[1], // TODO use cobra if we might ever use this from cli. probably good to even if just from CI/CD
-			namespace: os.Args[2],
-			valuesFile: os.Args[3],
-			templateFile: os.Args[4],
-			manifestLocation: os.Args[5],
+	r := &runner{args: args{outputLocation: "./calico-manifest.yaml"}}
+	var cmd = &cobra.Command{
+		Use:          "template-calico",
+		Short:        "Fills and outputs a calico manifest template",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return r.start()
 		},
 	}
 
+	cmd.Flags().StringVar(&r.args.release, "release", r.args.release, "Helm release name")
+	cmd.MarkFlagRequired("release")
+	cmd.Flags().StringVarP(&r.args.namespace, "namespace", "n", r.args.namespace, "Helm release namespace")
+	cmd.MarkFlagRequired("namespace")
+	cmd.PersistentFlags().StringArrayVarP(&r.args.valuesFiles, "valuesFiles", "f", r.args.valuesFiles, "Values file(s) used to template manifests (for now list default values file FIRST)")
+	cmd.Flags().StringVar(&r.args.templateFile, "templateFile", r.args.templateFile, "Calico template file to render")
+	cmd.MarkFlagRequired("templateFile")
+	cmd.Flags().StringVarP(&r.args.outputLocation, "outputLocation", "o", r.args.outputLocation, "File in which to save the outputted calico manifest")
+
+	return cmd.Execute()
+}
+
+func (r *runner) start() error {
 	// translate the values file into a map
 	values, err := r.mapValues()
 	if err != nil {
@@ -68,15 +76,26 @@ func run() error {
 	return nil
 }
 
+// TODO  we expect values in additional values files to override values in default values.yaml?
+// Fix this in next version.
+// right now it overwrites with whatever is in subsequent values files.
+// Only looks top level- i.e if one values file has global.key1: value1, and second has global.key2: value2,
+// we only will see global.key2: value2, not both
 func (r *runner) mapValues() (map[string]interface{}, error) {
-	valuesBytes, err := ioutil.ReadFile(r.args.valuesFile)
-	if err != nil {
-		return nil, errors.Wrap(err, "error reading values file")
-	}
 	values := make(map[string](interface{}))
-	err = yaml.Unmarshal(valuesBytes, &values)
-	if err != nil {
-		return nil, errors.Wrap(err, "error unmarshalling yaml from values file")
+	for _, f := range r.args.valuesFiles {
+		fileValues := make(map[string]interface{})
+		b, err := ioutil.ReadFile(f)
+		if err != nil {
+			return nil, errors.Wrapf(err, "error reading values file %s", f)
+		}
+		err = yaml.Unmarshal(b, &fileValues)
+		if err != nil {
+			return nil, errors.Wrap(err, "error unmarshalling yaml from values file")
+		}
+		for k, v := range fileValues {
+			values[k] = v
+		}
 	}
 	return values, nil
 }
@@ -149,6 +168,7 @@ func (r *runner) replaceTemplateValue(line string, locationMatch []int) (string,
 			return "", errors.New(fmt.Sprintf("unknown value: %s", valueToGet))
 		}
 	} else if keys[0] == "Values" {
+		// TODO this is disgusting. and only goes down 3 levels.
 		switch len(keys) {
 		case 2:
 			if s, ok := r.values[keys[1]].(string); ok {
@@ -162,7 +182,6 @@ func (r *runner) replaceTemplateValue(line string, locationMatch []int) (string,
 			}
 		case 4:
 			if m, ok := r.values[keys[1]].(map[interface{}]interface{}); ok {
-				fmt.Println("r.values[keys[1]] is a map")
 				if m2, ok := m[keys[2]].(map[interface{}]interface{}); ok {
 					if s, ok := m2[keys[3]].(string); ok {
 						newValue = s
@@ -181,7 +200,7 @@ func (r *runner) replaceTemplateValue(line string, locationMatch []int) (string,
 }
 
 func (r *runner) writeManifestFile(lines []string) error {
-	f, err := os.OpenFile(r.args.manifestLocation, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(r.args.outputLocation, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return errors.Wrap(err, "error writing manifest file")
 	}
@@ -196,8 +215,8 @@ func (r *runner) writeManifestFile(lines []string) error {
 	writer.Flush()
 	f.Close()
 
-	fmt.Println("Wrote manifest to", r.args.manifestLocation)
-	fmt.Println("apply it with: calicoctl apply -f", r.args.manifestLocation)
+	fmt.Println("Wrote manifest to", r.args.outputLocation)
+	fmt.Println("apply it with: calicoctl apply -f", r.args.outputLocation)
 
 	return nil
 }
